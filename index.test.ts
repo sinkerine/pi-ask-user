@@ -3557,9 +3557,10 @@ describe("ask_user", () => {
          expect(inputTitle).toContain("3. Green");
       });
 
-      test("single-select can collect an optional comment after choosing an option", async () => {
+      test("single-select with allowComment submits directly without prompting for a comment", async () => {
          const tool = await setupTool();
          let inputCalls = 0;
+         let capturedOptions: string[] = [];
 
          const result = await tool.execute(
             "tool-call-id",
@@ -3574,7 +3575,56 @@ describe("ask_user", () => {
                hasUI: true,
                ui: {
                   custom: async () => undefined,
-                  select: async () => "Blue",
+                  select: async (_title: string, opts: string[]) => {
+                     capturedOptions = opts;
+                     return "Blue";
+                  },
+                  input: async () => {
+                     inputCalls += 1;
+                     return "should not be called";
+                  },
+               },
+            },
+         );
+
+         expect(capturedOptions).toEqual([
+            "Red",
+            "Blue",
+            "\u{1f4ac} Select option with comment...",
+            "\u270f\ufe0f Type custom response...",
+         ]);
+         expect(inputCalls).toBe(0);
+         expect(result.isError).not.toBe(true);
+         expect(result.details.response).toEqual({
+            kind: "selection",
+            selections: ["Blue"],
+         });
+         expect(result.details.cancelled).toBe(false);
+      });
+
+      test("single-select collects an optional comment when the comment option is chosen", async () => {
+         const tool = await setupTool();
+         let selectCalls = 0;
+         let inputCalls = 0;
+         const commentSentinel = "\u{1f4ac} Select option with comment...";
+
+         const result = await tool.execute(
+            "tool-call-id",
+            {
+               question: "Pick a color",
+               options: ["Red", "Blue"],
+               allowComment: true,
+            },
+            undefined,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  custom: async () => undefined,
+                  select: async () => {
+                     selectCalls += 1;
+                     return selectCalls === 1 ? commentSentinel : "Blue";
+                  },
                   input: async () => {
                      inputCalls += 1;
                      return "Keep it aligned with the settings screen.";
@@ -3583,6 +3633,7 @@ describe("ask_user", () => {
             },
          );
 
+         expect(selectCalls).toBe(2);
          expect(inputCalls).toBe(1);
          expect(result.isError).not.toBe(true);
          expect(result.details.response).toEqual({
@@ -3591,6 +3642,96 @@ describe("ask_user", () => {
             comment: "Keep it aligned with the settings screen.",
          });
          expect(result.details.cancelled).toBe(false);
+      });
+
+      test("multi-select with allowComment submits directly and supports inline or deferred comments", async () => {
+         const tool = await setupTool();
+
+         let directInputs = 0;
+         const direct = await tool.execute(
+            "tool-call-id",
+            {
+               question: "Pick colors",
+               options: ["Red", "Blue", "Green"],
+               allowMultiple: true,
+               allowComment: true,
+            },
+            undefined,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  custom: async () => undefined,
+                  select: async () => undefined,
+                  input: async () => {
+                     directInputs += 1;
+                     return "Red, Green";
+                  },
+               },
+            },
+         );
+         expect(directInputs).toBe(1);
+         expect(direct.details.response).toEqual({ kind: "selection", selections: ["Red", "Green"] });
+
+         let inlineInputs = 0;
+         const inline = await tool.execute(
+            "tool-call-id",
+            {
+               question: "Pick colors",
+               options: ["Red", "Blue", "Green"],
+               allowMultiple: true,
+               allowComment: true,
+            },
+            undefined,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  custom: async () => undefined,
+                  select: async () => undefined,
+                  input: async () => {
+                     inlineInputs += 1;
+                     return "Red, Green -- Keep it vibrant";
+                  },
+               },
+            },
+         );
+         expect(inlineInputs).toBe(1);
+         expect(inline.details.response).toEqual({
+            kind: "selection",
+            selections: ["Red", "Green"],
+            comment: "Keep it vibrant",
+         });
+
+         let deferredInputs = 0;
+         const deferred = await tool.execute(
+            "tool-call-id",
+            {
+               question: "Pick colors",
+               options: ["Red", "Blue", "Green"],
+               allowMultiple: true,
+               allowComment: true,
+            },
+            undefined,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  custom: async () => undefined,
+                  select: async () => undefined,
+                  input: async () => {
+                     deferredInputs += 1;
+                     return deferredInputs === 1 ? "Red, Green --" : "Deferred comment";
+                  },
+               },
+            },
+         );
+         expect(deferredInputs).toBe(2);
+         expect(deferred.details.response).toEqual({
+            kind: "selection",
+            selections: ["Red", "Green"],
+            comment: "Deferred comment",
+         });
       });
 
 
@@ -3725,12 +3866,14 @@ describe("cancellation correctness", () => {
                   select: async (_title: string, options: string[], opts: any) => {
                      calls++;
                      if (stage.stage === "select") return waitForAnswer(opts);
-                     return stage.freeform ? options[options.length - 1] : "A";
+                     if (stage.freeform) return options[options.length - 1];
+                     if (stage.params.allowComment) return "\u{1f4ac} Select option with comment...";
+                     return "A";
                   },
                   input: async (_title: string, _placeholder: string, opts: any) => {
                      calls++;
                      inputCalls++;
-                     if (stage.stage === "comment" && inputCalls === 1) return "A";
+                     if (stage.stage === "comment" && inputCalls === 1) return "A --";
                      return waitForAnswer(opts);
                   },
                } },
@@ -3763,8 +3906,8 @@ describe("cancellation correctness", () => {
                undefined, undefined,
                { hasUI: true, ui: {
                   custom: async () => undefined,
-                  select: async () => "A",
-                  input: async () => allowMultiple && inputs++ === 0 ? "A" : comment,
+                  select: async () => "\u{1f4ac} Select option with comment...",
+                  input: async () => allowMultiple && inputs++ === 0 ? "A --" : comment,
                } },
             );
             const cancelled = comment == null;
@@ -3788,9 +3931,11 @@ describe("cancellation correctness", () => {
                select: async (_title: string, options: string[]) => {
                   calls++;
                   controller.abort();
-                  return params.allowFreeform ? options[options.length - 1] : "A";
+                  if (params.allowFreeform) return options[options.length - 1];
+                  if (params.allowComment) return "\u{1f4ac} Select option with comment...";
+                  return "A";
                },
-               input: async () => { calls++; controller.abort(); return "A"; },
+               input: async () => { calls++; controller.abort(); return params.allowComment ? "A --" : "A"; },
             } },
          );
          expect(calls).toBe(1);

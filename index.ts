@@ -356,6 +356,26 @@ function parseDialogSelections(input: string): string[] {
       .filter(Boolean);
 }
 
+function parseMultiSelectDialogInput(
+   raw: string,
+   allowComment: boolean,
+): { selections: string[]; comment?: string; promptComment: boolean } {
+   if (!allowComment) {
+      return { selections: parseDialogSelections(raw), promptComment: false };
+   }
+   const sepMatch = /\s+--(?:\s+([\s\S]*)|\s*$)/.exec(raw);
+   if (!sepMatch) {
+      return { selections: parseDialogSelections(raw), promptComment: false };
+   }
+   const selectionPart = raw.slice(0, sepMatch.index);
+   const commentPart = sepMatch[1]?.trim();
+   return {
+      selections: parseDialogSelections(selectionPart),
+      comment: commentPart || undefined,
+      promptComment: !commentPart,
+   };
+}
+
 function isCancelledInput(value: unknown): value is null | undefined {
    return value === null || value === undefined;
 }
@@ -523,6 +543,7 @@ const SINGLE_SELECT_SPLIT_PANE_LEFT_MIN_WIDTH = 32;
 const SINGLE_SELECT_SPLIT_PANE_RIGHT_MIN_WIDTH = 28;
 const SINGLE_SELECT_SPLIT_PANE_SEPARATOR = " │ ";
 const FREEFORM_SENTINEL = "\u270f\ufe0f Type custom response...";
+const COMMENT_SELECT_SENTINEL = "\u{1f4ac} Select option with comment...";
 const COMMENT_TOGGLE_LABEL = "Add extra context after selection";
 const DEFAULT_OVERLAY_TOGGLE_KEY = "alt+o";
 const DEFAULT_COMMENT_TOGGLE_KEY = "ctrl+g";
@@ -2705,30 +2726,33 @@ async function askViaDialogs(
       if (selectionOpts === null) return null;
       const rawSelections = await ui.input(
          `${prompt}\n\nOptions (select one or more):\n${optionList}`,
-         "Type your selection(s)...",
+         allowComment
+            ? "Type your selection(s)... (append -- comment to add extra context)"
+            : "Type your selection(s)...",
          selectionOpts,
       ) as string | undefined;
       if (dialogOpts?.signal?.aborted || isCancelledInput(rawSelections)) return null;
 
-      const selections = parseDialogSelections(rawSelections);
-      if (selections.length === 0) return null;
+      const parsed = parseMultiSelectDialogInput(rawSelections, allowComment);
+      if (parsed.selections.length === 0) return null;
 
-      if (!allowComment) {
-         return createSelectionResponse(selections);
+      if (!parsed.promptComment) {
+         return createSelectionResponse(parsed.selections, parsed.comment);
       }
 
       const commentOpts = dialogStageOptions(dialogOpts, deadline);
       if (commentOpts === null) return null;
       const comment = await ui.input(
-         buildCommentPrompt(prompt, selections),
+         buildCommentPrompt(prompt, parsed.selections),
          "Optional comment (press Enter to skip)...",
          commentOpts,
       ) as string | undefined;
       if (dialogOpts?.signal?.aborted || isCancelledInput(comment)) return null;
-      return createSelectionResponse(selections, comment);
+      return createSelectionResponse(parsed.selections, comment);
    }
 
    const selectOptions = options.map((o) => o.title);
+   if (allowComment) selectOptions.push(COMMENT_SELECT_SENTINEL);
    if (allowFreeform) selectOptions.push(FREEFORM_SENTINEL);
 
    const selectOpts = dialogStageOptions(dialogOpts, deadline);
@@ -2744,19 +2768,33 @@ async function askViaDialogs(
       return createFreeformResponse(answer);
    }
 
-   if (!allowComment) {
+   if (selected !== COMMENT_SELECT_SENTINEL) {
       return createSelectionResponse([selected]);
+   }
+
+   let commentTarget: string | undefined;
+   if (options.length === 1) {
+      commentTarget = options[0].title;
+   } else {
+      const targetOpts = dialogStageOptions(dialogOpts, deadline);
+      if (targetOpts === null) return null;
+      commentTarget = await ui.select(
+         `${prompt}\n\nChoose an option to comment on:`,
+         options.map((o) => o.title),
+         targetOpts,
+      ) as string | undefined;
+      if (dialogOpts?.signal?.aborted || isCancelledInput(commentTarget)) return null;
    }
 
    const commentOpts = dialogStageOptions(dialogOpts, deadline);
    if (commentOpts === null) return null;
    const comment = await ui.input(
-      buildCommentPrompt(prompt, [selected]),
+      buildCommentPrompt(prompt, [commentTarget]),
       "Optional comment (press Enter to skip)...",
       commentOpts,
    ) as string | undefined;
    if (dialogOpts?.signal?.aborted || isCancelledInput(comment)) return null;
-   return createSelectionResponse([selected], comment);
+   return createSelectionResponse([commentTarget], comment);
 }
 
 /**
